@@ -7,9 +7,10 @@ import CreateServerDialog from "./CreateServerDialog";
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { JoinServer } from "./Joinserver";
-import { ChannelList } from "./Channel"; // Make sure this component exists and works correctly
+import { ChannelList } from "./Channel";
 import CreateChannelDialog from "./CreateChannelDialog";
 import InviteDialog from "./InviteDialog";
+import useSocket from "../hooks/useSocket";
 
 interface Server {
   id: string;
@@ -29,7 +30,6 @@ interface User {
   username: string;
   displayName?: string;
   avatar?: string;
-  // ... other user properties
 }
 
 interface Message {
@@ -38,11 +38,13 @@ interface Message {
   author: {
     id: string;
     username: string;
+    displayName?: string;
     avatar?: string;
-    // ... other author properties if needed
   };
-  createdAt: string; // ISO string
-  // isSending?: boolean; // Optional for optimistic updates
+  createdAt: string;
+  attachments?: any[];
+  replyTo?: any;
+  isSending?: boolean; // For optimistic updates
 }
 
 export default function DiscordClone() {
@@ -54,10 +56,14 @@ export default function DiscordClone() {
   const [openChannelDialog, setOpenChannelDialog] = useState(false);
   const [openInviteDialog, setOpenInviteDialog] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(null);
-
+  
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+
+  // Get socket instance
+  const { socket, isConnected, joinChannel, leaveChannel } = useSocket();
 
   // Fetch user data on mount
   useEffect(() => {
@@ -66,7 +72,6 @@ export default function DiscordClone() {
         const token = localStorage.getItem("token");
         if (!token) {
           console.error("No token found");
-          // Redirect to login or handle unauthorized state
           return;
         }
 
@@ -104,64 +109,143 @@ export default function DiscordClone() {
   // Fetch messages when a channel is selected
   useEffect(() => {
     const fetchMessages = async () => {
-      if (selectedChannel) {
-        try {
-          const token = localStorage.getItem("token");
-          if (!token) return;
+      if (!selectedChannel) {
+        setMessages([]);
+        return;
+      }
 
-          const res = await axios.get<Message[]>(
-            `http://localhost:3000/api/channels/${selectedChannel.id}/messages`,
-            {
-              headers: { Authorization: `Bearer ${token}` }
-            }
-          );
-          // Assuming API returns newest first, reverse for display (oldest first)
-          setMessages(res.data.reverse());
-        } catch (err) {
-          console.error("Failed to fetch messages", err);
-          setMessages([]); // Clear messages on error
-        }
-      } else {
-        setMessages([]); // Clear messages if no channel is selected
+      setIsLoadingMessages(true);
+      try {
+        const token = localStorage.getItem("token");
+        if (!token) return;
+
+        const res = await axios.get<Message[]>(
+          `http://localhost:3000/api/channels/${selectedChannel.id}/messages`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { limit: 50 } // Fetch last 50 messages
+          }
+        );
+        // Messages should already be in correct order from backend
+        setMessages(res.data);
+      } catch (err) {
+        console.error("Failed to fetch messages", err);
+        setMessages([]);
+      } finally {
+        setIsLoadingMessages(false);
       }
     };
+
     fetchMessages();
-  }, [selectedChannel]); // Depend only on selectedChannel
+  }, [selectedChannel]);
+
+  // Handle real-time socket events
+  useEffect(() => {
+    if (!socket || !isConnected) return;
+
+    const handleNewMessage = (message: Message) => {
+      console.log("Received new message:", message);
+      setMessages(prev => {
+        // Remove any optimistic message with temp ID
+        const filtered = prev.filter(m => !m.isSending || m.id !== message.id);
+        return [...filtered, message];
+      });
+    };
+
+    const handleMessageUpdate = (message: Message) => {
+      console.log("Message updated:", message);
+      setMessages(prev => 
+        prev.map(m => m.id === message.id ? message : m)
+      );
+    };
+
+    const handleMessageDelete = (data: { messageId: string }) => {
+      console.log("Message deleted:", data.messageId);
+      setMessages(prev => 
+        prev.filter(m => m.id !== data.messageId)
+      );
+    };
+
+    const handleError = (error: { message: string }) => {
+      console.error("Socket error:", error);
+      alert(`Error: ${error.message}`);
+    };
+
+    // Listen to socket events
+    socket.on('message', handleNewMessage);
+    socket.on('message_update', handleMessageUpdate);
+    socket.on('message_delete', handleMessageDelete);
+    socket.on('error', handleError);
+
+    return () => {
+      socket.off('message', handleNewMessage);
+      socket.off('message_update', handleMessageUpdate);
+      socket.off('message_delete', handleMessageDelete);
+      socket.off('error', handleError);
+    };
+  }, [socket, isConnected]);
+
+  // Join/leave channels when selection changes
+  useEffect(() => {
+    if (!socket || !isConnected) return;
+
+    // Leave previous channel
+    const prevChannel = selectedChannel;
+    
+    return () => {
+      if (prevChannel) {
+        leaveChannel(prevChannel.id);
+      }
+    };
+  }, [selectedChannel, socket, isConnected, leaveChannel]);
+
+  useEffect(() => {
+    if (selectedChannel && socket && isConnected) {
+      joinChannel(selectedChannel.id);
+    }
+  }, [selectedChannel, socket, isConnected, joinChannel]);
 
   const handleMessageSend = async () => {
-    if (!newMessage.trim() || !selectedChannel) return;
-    const token = localStorage.getItem("token");
-    if (!token) return;
+    if (!newMessage.trim() || !selectedChannel || !user) return;
 
     const tempId = `temp-${Date.now()}`;
-    const tempMessage: Message & { isSending?: boolean } = {
+    const tempMessage: Message = {
       id: tempId,
       content: newMessage,
-      author: { id: user?.id || 'unknown', username: user?.displayName || user?.username || "You", avatar: user?.avatar },
+      author: {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        avatar: user.avatar
+      },
       createdAt: new Date().toISOString(),
       isSending: true,
     };
 
     // Optimistic update
     setMessages(prev => [...prev, tempMessage]);
-    const messageToSend = newMessage;
+    const messageContent = newMessage;
     setNewMessage("");
 
     try {
+      // Send via REST API (which will also broadcast via WebSocket)
+      const token = localStorage.getItem("token");
+      if (!token) return;
+
       const res = await axios.post<Message>(
         `http://localhost:3000/api/channels/${selectedChannel.id}/messages`,
-        { content: messageToSend },
+        { content: messageContent },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      // Replace temp message with real one
-      setMessages(prev =>
-        prev.map(msg => (msg.id === tempId ? res.data : msg))
-      );
+
+      // Remove optimistic message - real message will come via WebSocket
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+
     } catch (err) {
       console.error("Failed to send message", err);
-      // Remove temp message and restore input on error
-      setMessages(prev => prev.filter(msg => msg.id !== tempId));
-      setNewMessage(messageToSend);
+      // Remove optimistic message and restore input
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      setNewMessage(messageContent);
       alert("Failed to send message.");
     }
   };
@@ -176,12 +260,30 @@ export default function DiscordClone() {
 
   // Reset channel and messages when switching servers or views
   useEffect(() => {
-    setSelectedChannel(null);
-    setMessages([]);
+    if (selectedChannel) {
+      setSelectedChannel(null);
+      setMessages([]);
+    }
   }, [selectedView]);
+
+  const handleChannelSelect = (channel: Channel) => {
+    // Leave current channel before selecting new one
+    if (selectedChannel && socket && isConnected) {
+      leaveChannel(selectedChannel.id);
+    }
+    setSelectedChannel(channel);
+    setMessages([]); // Clear messages immediately for better UX
+  };
 
   return (
     <div className="h-screen w-screen flex bg-[#313338] text-white overflow-hidden">
+      {/* Connection Status Indicator */}
+      {!isConnected && (
+        <div className="absolute top-0 left-0 right-0 bg-yellow-600 text-center py-1 text-sm z-50">
+          Connecting to server...
+        </div>
+      )}
+
       {/* Sidebar */}
       <div className="w-16 bg-[#1e1f22] flex flex-col items-center py-3 space-y-3 overflow-y-auto">
         <Button
@@ -231,7 +333,9 @@ export default function DiscordClone() {
           onClick={() => setJoin(true)}
           title="Join a Server"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-compass"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265ZM21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 12Z"/></svg>
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265ZM21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 12Z"/>
+          </svg>
         </Button>
         <JoinServer open={join} onClose={() => setJoin(false)} />
       </div>
@@ -262,95 +366,91 @@ export default function DiscordClone() {
             </div>
 
             <div className="flex-1 overflow-y-auto">
-              {/* Pass setSelectedChannel as onSelect prop */}
               <ChannelList
                 serverId={(selectedView as { serverId: string }).serverId}
-                onSelect={(channel) => setSelectedChannel(channel)}
-                selectedChannel={selectedChannel} // Pass selected channel for highlighting
+                onSelect={handleChannelSelect}
+                selectedChannel={selectedChannel}
               />
             </div>
 
-            {/* Owner-specific actions */}
-          {(() => {
-  const server = servers.find(
-    (s) => s.id === (selectedView as { serverId: string }).serverId
-  );
-  if (!server) return null;
+            {/* Server Actions */}
+            {(() => {
+              const server = servers.find(
+                (s) => s.id === (selectedView as { serverId: string }).serverId
+              );
+              if (!server) return null;
 
-  return (
-    <div className="p-2 space-y-1">
-      {/* Invite People (everyone can see) */}
-      <Button
-        className="w-full !bg-gray-700 hover:!bg-gray-600 text-xs flex items-center justify-start"
-        onClick={async () => {
-          try {
-            const token = localStorage.getItem("token");
-            if (!token || !server.id) return;
-            const res = await axios.post<{ code: string }>(
-              `http://localhost:3000/api/servers/${server.id}/invites`,
-              {},
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            setInviteCode(res.data.code);
-            setOpenInviteDialog(true);
-          } catch (err) {
-            console.error("Failed to create invite", err);
-            alert("Failed to create invite");
-          }
-        }}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="mr-1"
-        >
-          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-        </svg>
-        Invite People
-      </Button>
+              return (
+                <div className="p-2 space-y-1">
+                  <Button
+                    className="w-full !bg-gray-700 hover:!bg-gray-600 text-xs flex items-center justify-start"
+                    onClick={async () => {
+                      try {
+                        const token = localStorage.getItem("token");
+                        if (!token || !server.id) return;
+                        const res = await axios.post<{ code: string }>(
+                          `http://localhost:3000/api/servers/${server.id}/invites`,
+                          {},
+                          { headers: { Authorization: `Bearer ${token}` } }
+                        );
+                        setInviteCode(res.data.code);
+                        setOpenInviteDialog(true);
+                      } catch (err) {
+                        console.error("Failed to create invite", err);
+                        alert("Failed to create invite");
+                      }
+                    }}
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="mr-1"
+                    >
+                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                    </svg>
+                    Invite People
+                  </Button>
 
-      {/* Create Channel (only for owner) */}
-      {server.owner?.id === user?.id && (
-        <Button
-          className="w-full !bg-gray-700 hover:!bg-gray-600 text-xs flex items-center justify-start"
-          onClick={() => setOpenChannelDialog(true)}
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-1"
-          >
-            <line x1="12" x2="12" y1="5" y2="19"></line>
-            <line x1="5" x2="19" y1="12" y2="12"></line>
-          </svg>
-          Create Channel
-        </Button>
-      )}
+                  {server.owner?.id === user?.id && (
+                    <Button
+                      className="w-full !bg-gray-700 hover:!bg-gray-600 text-xs flex items-center justify-start"
+                      onClick={() => setOpenChannelDialog(true)}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="mr-1"
+                      >
+                        <line x1="12" x2="12" y1="5" y2="19"></line>
+                        <line x1="5" x2="19" y1="12" y2="12"></line>
+                      </svg>
+                      Create Channel
+                    </Button>
+                  )}
 
-      <InviteDialog
-        open={openInviteDialog}
-        onClose={() => setOpenInviteDialog(false)}
-        inviteCode={inviteCode}
-      />
-    </div>
-  );
-})()}
-
+                  <InviteDialog
+                    open={openInviteDialog}
+                    onClose={() => setOpenInviteDialog(false)}
+                    inviteCode={inviteCode}
+                  />
+                </div>
+              );
+            })()}
 
             <CreateChannelDialog
               open={openChannelDialog}
@@ -378,8 +478,8 @@ export default function DiscordClone() {
             <div className="flex flex-col items-start">
               <span className="text-sm font-medium">{user?.displayName || user?.username || "User"}</span>
               <div className="flex items-center gap-1">
-                <span className="inline-block h-2 w-2 rounded-full bg-green-400" />
-                <span className="text-xs text-gray-400">Online</span>
+                <span className={`inline-block h-2 w-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+                <span className="text-xs text-gray-400">{isConnected ? 'Online' : 'Offline'}</span>
               </div>
             </div>
           </div>
@@ -405,33 +505,53 @@ export default function DiscordClone() {
 
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#36393f]">
-              {messages.map((msg) => (
-                <div key={msg.id} className="flex hover:bg-[#32353b] p-2 rounded">
-                  <Avatar className="h-10 w-10 mr-3 flex-shrink-0">
-                    <AvatarImage
-                      src={
-                        msg.author?.avatar ||
-                        `https://api.dicebear.com/6.x/bottts/svg?seed=${msg.author?.username || 'default'}`
-                      }
-                      alt={msg.author?.username || "User"}
-                    />
-                    <AvatarFallback>
-                      {msg.author?.username?.[0]?.toUpperCase() || "?"}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline">
-                      <span className="font-semibold text-white mr-2">{msg.author?.username || "Unknown User"}</span>
-                      <span className="text-xs text-gray-400">
-                        {new Date(msg.createdAt).toLocaleString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                    <div className="text-gray-300 break-words">
-                      {msg.content}
+              {isLoadingMessages ? (
+                <div className="flex justify-center items-center h-32">
+                  <div className="text-gray-400">Loading messages...</div>
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="flex justify-center items-center h-32">
+                  <div className="text-gray-400">No messages yet. Be the first to say something!</div>
+                </div>
+              ) : (
+                messages.map((msg) => (
+                  <div key={msg.id} className={`flex hover:bg-[#32353b] p-2 rounded ${msg.isSending ? 'opacity-60' : ''}`}>
+                    <Avatar className="h-10 w-10 mr-3 flex-shrink-0">
+                      <AvatarImage
+                        src={
+                          msg.author?.avatar ||
+                          `https://api.dicebear.com/6.x/bottts/svg?seed=${msg.author?.username || 'default'}`
+                        }
+                        alt={msg.author?.username || "User"}
+                      />
+                      <AvatarFallback>
+                        {msg.author?.username?.[0]?.toUpperCase() || "?"}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-baseline">
+                        <span className="font-semibold text-white mr-2">
+                          {msg.author?.displayName || msg.author?.username || "Unknown User"}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          {new Date(msg.createdAt).toLocaleString([], { 
+                            hour: '2-digit', 
+                            minute: '2-digit',
+                            month: 'short',
+                            day: 'numeric'
+                          })}
+                        </span>
+                        {msg.isSending && (
+                          <span className="text-xs text-gray-500 ml-2">Sending...</span>
+                        )}
+                      </div>
+                      <div className="text-gray-300 break-words">
+                        {msg.content}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
 
             {/* Message input */}
@@ -443,15 +563,21 @@ export default function DiscordClone() {
                   onKeyDown={handleKeyDown}
                   placeholder={`Message #${selectedChannel.name}`}
                   className="flex-1 bg-transparent border-0 text-gray-200 focus-visible:ring-0 py-4"
+                  disabled={!isConnected}
                 />
                 <Button
                   onClick={handleMessageSend}
-                  disabled={!newMessage.trim()}
-                  className="ml-2 bg-indigo-600 hover:bg-indigo-700"
+                  disabled={!newMessage.trim() || !isConnected}
+                  className="ml-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-600"
                 >
                   Send
                 </Button>
               </div>
+              {!isConnected && (
+                <div className="text-xs text-red-400 mt-1">
+                  Disconnected - messages cannot be sent
+                </div>
+              )}
             </div>
           </>
         ) : (
