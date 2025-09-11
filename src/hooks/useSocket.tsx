@@ -1,8 +1,7 @@
-// hooks/useSocket.ts
 import { useEffect, useRef, useState } from 'react';
-import io, { Socket } from 'socket.io-client';
+import { io, Socket } from 'socket.io-client';
 
-const SOCKET_URL = 'http://localhost:3001'; // Match your backend URL
+const SOCKET_URL = 'http://localhost:3000';
 
 export const useSocket = () => {
   const socketRef = useRef<Socket | null>(null);
@@ -17,12 +16,13 @@ export const useSocket = () => {
       return;
     }
 
-    // Initialize Socket.IO connection with auth token
+    // Initialize Socket.IO connection
     socketRef.current = io(SOCKET_URL, {
-      auth: {
-        token: `Bearer ${token}`,
-      },
-      transports: ['websocket', 'polling'], // Match backend transports if specified
+      auth: { token }, // 👈 send token without 'Bearer'
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
 
     const socket = socketRef.current;
@@ -34,63 +34,42 @@ export const useSocket = () => {
     });
 
     socket.on('disconnect', (reason) => {
-      console.log('Disconnected from WebSocket:', reason);
+      console.log('Disconnected:', reason);
       setIsConnected(false);
-      // Reconnect manually if needed based on reason, or let Socket.IO handle it
     });
 
     socket.on('connect_error', (err) => {
       console.error('WebSocket connection error:', err);
-      setError(`Connection failed: ${err.message}`);
+      setError(err.message);
       setIsConnected(false);
     });
 
-    // Listen for general errors
     socket.on('error', (data) => {
-      console.error('WebSocket error received:', data);
-      setError(data.message || 'An error occurred with the real-time connection.');
+      console.error('Socket error:', data);
+      setError(data.message || 'Socket error');
     });
 
-    // Cleanup on unmount
     return () => {
       if (socket) {
         socket.disconnect();
-        socket.removeAllListeners(); // Clean up listeners
+        socket.removeAllListeners();
       }
       socketRef.current = null;
       setIsConnected(false);
     };
-  }, []); // Run only once on mount
+  }, []);
 
   const joinChannel = (channelId: string) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit('join_channel', channelId);
-      console.log(`Emitted join_channel for ${channelId}`);
-    } else {
-      console.warn('Cannot join channel: Socket not connected');
-    }
+    if (socketRef.current?.connected) socketRef.current.emit('join_channel', channelId);
   };
 
   const leaveChannel = (channelId: string) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit('leave_channel', channelId);
-      console.log(`Emitted leave_channel for ${channelId}`);
-    } else {
-      console.warn('Cannot leave channel: Socket not connected');
-    }
+    if (socketRef.current?.connected) socketRef.current.emit('leave_channel', channelId);
   };
 
   const sendMessage = (data: { channelId: string; content: string; replyToId?: string }) => {
-    if (socketRef.current?.connected) {
-      socketRef.current.emit('message', data);
-      console.log(`Emitted message to ${data.channelId}`);
-    } else {
-      console.warn('Cannot send message: Socket not connected');
-    }
+    if (socketRef.current?.connected) socketRef.current.emit('message', data);
   };
-
-  // Expose the socket instance directly if needed for other events
-  const getSocket = () => socketRef.current;
 
   return {
     socket: socketRef.current,
@@ -98,8 +77,7 @@ export const useSocket = () => {
     error,
     joinChannel,
     leaveChannel,
-    sendMessage,
-    getSocket,
+    sendMessage
   };
 };
 
