@@ -12,10 +12,20 @@ import {
   Pin,
   Bell,
   Check,
-  X
+  X,
+  Copy,
+  Trash2
 } from "lucide-react";
 import useSocket from '../hooks/useSocket';
 import axios from 'axios';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
 
 interface User {
   id: string;
@@ -56,6 +66,7 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
   // --- Group messages by date ---
   const groupMessagesByDate = (msgs: DirectMessage[]) => {
     return msgs.reduce((groups: Record<string, DirectMessage[]>, msg) => {
+      // Use a consistent date format for grouping (e.g., "Month Day, Year")
       const dateKey = new Date(msg.createdAt).toLocaleDateString("en-US", {
         day: "numeric",
         month: "long",
@@ -132,12 +143,18 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
       }
     };
 
+    const handleDirectMessageDeleted = (data: { messageId: string }) => {
+      setMessages(prev => prev.filter(msg => msg.id !== data.messageId));
+    };
+
     socket.on('direct_message_received', handleDirectMessageReceived);
     socket.on('direct_message_updated', handleDirectMessageUpdated);
+    socket.on('direct_message_deleted', handleDirectMessageDeleted);
 
     return () => {
       socket.off('direct_message_received', handleDirectMessageReceived);
       socket.off('direct_message_updated', handleDirectMessageUpdated);
+      socket.off('direct_message_deleted', handleDirectMessageDeleted);
     };
   }, [socket, selectedUser, currentUser]);
 
@@ -193,6 +210,7 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
     }
 
     try {
+      // Optimistically update UI
       setMessages(prev =>
         prev.map(msg =>
           msg.id === editingMessageId ? { ...msg, content: editContent.trim(), edited: true } : msg
@@ -209,8 +227,9 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
       );
     } catch (error) {
       console.error('Failed to edit message:', error);
+      // Revert optimistic update on error
       setMessages(prev =>
-        prev.map(msg => (msg.id === editingMessageId ? originalMessage! : msg))
+        prev.map(msg => (msg.id === editingMessageId ? originalMessage : msg))
       );
       alert('Failed to edit message.');
     } finally {
@@ -221,6 +240,64 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
   const handleEditKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') handleSaveEdit();
     else if (e.key === 'Escape') handleCancelEdit();
+  };
+
+  // Copy message content to clipboard
+  const handleCopyMessage = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch (err) {
+      console.error('Failed to copy message: ', err);
+      alert('Failed to copy message.');
+    }
+  };
+
+  // Delete message
+  const handleDeleteMessage = async (messageId: string) => {
+    const confirmDelete = window.confirm('Are you sure you want to delete this message?');
+    if (!confirmDelete) return;
+
+    try {
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token");
+      }
+
+      // Optimistic UI update
+      const messageToDelete = messages.find(msg => msg.id === messageId);
+      setMessages(prev => prev.filter(msg => msg.id !== messageId));
+
+      const response = await axios.delete(`http://localhost:3000/api/dms/messages/${messageId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (response.status !== 200) {
+        throw new Error('Failed to delete message on server');
+      }
+
+    } catch (err) {
+      console.error("Delete message failed:", err);
+      alert("Failed to delete message. Please try again.");
+      
+      // Revert optimistic update on error
+      if (selectedUser && currentUser) {
+        const loadConversation = async () => {
+          try {
+            const token = localStorage.getItem('token');
+            if (!token) return;
+
+            const res = await axios.get<DirectMessage[]>(`http://localhost:3000/api/dms/${selectedUser.id}/messages`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+
+            setMessages(res.data);
+          } catch (error) {
+            console.error('Failed to reload conversation:', error);
+          }
+        };
+        loadConversation();
+      }
+    }
   };
 
   const getStatusColor = (status?: string) => {
@@ -288,51 +365,102 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
                   </div>
 
                   {msgs.map(message => (
-                    <div key={message.id} className="flex items-start">
+                    <div key={message.id} className="flex items-start group hover:bg-[#32353b] px-2 py-1 rounded">
                       <Avatar className="h-10 w-10 mr-3 flex-shrink-0">
                         <AvatarImage src={message.author.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${message.author.username}`} />
                         <AvatarFallback>{message.author.username[0]?.toUpperCase()}</AvatarFallback>
                       </Avatar>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-baseline">
-                          <span className="font-semibold text-white mr-2">{message.author.displayName || message.author.username}</span>
-                         <span className="text-xs text-gray-400 whitespace-nowrap">
-  {new Date(message.createdAt).toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  })}
-</span>
-
+                        {/* Header with name, timestamp, and menu */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-baseline">
+                            <span className="font-semibold text-white mr-2">{message.author.displayName || message.author.username}</span>
+                            <span className="text-xs text-gray-400 whitespace-nowrap">
+                              {new Date(message.createdAt).toLocaleString("en-GB", {
+                                day: "2-digit",
+                                month: "2-digit",
+                                year: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          </div>
+                          
+                          {/* Three-dot menu - Only for own messages */}
+                          {message.authorId === currentUser?.id && (
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="p-1 h-6 w-6 text-gray-400 hover:text-gray-200 hover:bg-[#40444b]"
+                                  >
+                                    <MoreVertical className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="bg-[#18191c] border-[#202225] text-white">
+                                  <DropdownMenuLabel>Message</DropdownMenuLabel>
+                                  <DropdownMenuSeparator className="bg-[#202225]" />
+                                  <DropdownMenuItem
+                                    className="hover:bg-[#36393f] focus:bg-[#36393f] cursor-pointer"
+                                    onClick={() => handleStartEdit(message)}
+                                  >
+                                    <span>Edit</span>
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    className="hover:bg-[#36393f] focus:bg-[#36393f] cursor-pointer"
+                                    onClick={() => handleCopyMessage(message.content)}
+                                  >
+                                    <Copy className="mr-2 h-4 w-4" />
+                                    <span>Copy</span>
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    className="hover:bg-red-600 focus:bg-red-600 text-red-400 hover:text-white focus:text-white cursor-pointer"
+                                    onClick={() => handleDeleteMessage(message.id)}
+                                  >
+                                    <Trash2 className="mr-2 h-4 w-4" />
+                                    <span>Delete</span>
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          )}
                         </div>
-                        {editingMessageId === message.id ? (
-                          <div className="flex items-center mt-1">
-                            <Input
-                              ref={editInputRef}
-                              type="text"
-                              value={editContent}
-                              onChange={(e) => setEditContent(e.target.value)}
-                              onKeyDown={handleEditKeyDown}
-                              className="flex-1 bg-[#40444b] text-white border-0 focus:ring-1 focus:ring-blue-500"
-                            />
-                            <Button onClick={handleSaveEdit} size="sm" variant="ghost" className="ml-2 text-green-400 hover:text-green-300 hover:bg-[#40444b]">
-                              <Check className="h-4 w-4" />
-                            </Button>
-                            <Button onClick={handleCancelEdit} size="sm" variant="ghost" className="ml-1 text-gray-400 hover:text-gray-300 hover:bg-[#40444b]">
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        ) : (
-                          <div
-                            className="text-gray-300 break-words hover:bg-[#3a3d43] p-1 rounded cursor-text"
-                            onDoubleClick={() => handleStartEdit(message)}
-                          >
-                            {message.content}
-                            {message.edited && <span className="text-xs text-gray-500 ml-2">(edited)</span>}
-                          </div>
-                        )}
+
+                        {/* Message Content / Edit Input */}
+                        <div className="mt-1">
+                          {editingMessageId === message.id ? (
+                            // Edit mode
+                            <div className="flex items-center">
+                              <Input
+                                ref={editInputRef}
+                                type="text"
+                                value={editContent}
+                                onChange={(e) => setEditContent(e.target.value)}
+                                onKeyDown={handleEditKeyDown}
+                                className="flex-1 bg-[#40444b] text-white border-0 focus:ring-1 focus:ring-blue-500"
+                              />
+                              <Button onClick={handleSaveEdit} size="sm" variant="ghost" className="ml-2 text-green-400 hover:text-green-300 hover:bg-[#40444b]">
+                                <Check className="h-4 w-4" />
+                              </Button>
+                              <Button onClick={handleCancelEdit} size="sm" variant="ghost" className="ml-1 text-gray-400 hover:text-gray-300 hover:bg-[#40444b]">
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          ) : (
+                            // Display mode
+                            <div 
+                              className="text-gray-300 break-words cursor-text flex items-start"
+                              onDoubleClick={() => handleStartEdit(message)}
+                            >
+                              <span className="flex-1">{message.content}</span>
+                              {message.edited && (
+                                <span className="text-xs text-gray-500 ml-2 mt-0.5 flex-shrink-0">(edited)</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -401,10 +529,10 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
               <p className="text-gray-300">
                 {selectedUser.createdAt
                   ? new Date(selectedUser.createdAt).toLocaleDateString("en-US", {
-                      day: "numeric",
-                      month: "long",
-                      year: "numeric",
-                    })
+                    day: "numeric",
+                    month: "long",
+                    year: "numeric",
+                  })
                   : 'Unknown'}
               </p>
             </div>
