@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
+import { useCallSocket } from '../hooks/useCallSocket.js';
+import CallInterface from './callUI';
 import {
   MessageCircle,
   Send,
@@ -62,6 +64,10 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState<string>('');
   const editInputRef = useRef<HTMLInputElement>(null);
+
+
+  const [isCallInterfaceOpen, setIsCallInterfaceOpen] = useState(false);
+const { initiateCall } = useCallSocket();
 
   // --- Group messages by date ---
   const groupMessagesByDate = (msgs: DirectMessage[]) => {
@@ -236,7 +242,7 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
       handleCancelEdit();
     }
   };
-
+console.log("selected user id:",selectedUser.id)
   const handleEditKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') handleSaveEdit();
     else if (e.key === 'Escape') handleCancelEdit();
@@ -327,27 +333,54 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <div className="h-12 bg-[#36393f] border-b border-[#202225] flex items-center justify-between px-4">
-          <div className="flex items-center">
-            <div className="relative">
-              <Avatar className="h-8 w-8">
-                <AvatarImage src={selectedUser.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${selectedUser.username}`} />
-                <AvatarFallback>{selectedUser.username[0]?.toUpperCase()}</AvatarFallback>
-              </Avatar>
-              <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#36393f] ${getStatusColor(selectedUser.status)}`} />
-            </div>
-            <span className="ml-2 text-white font-medium">{selectedUser.displayName || selectedUser.username}</span>
-            <span className="ml-2 text-gray-400 text-sm capitalize">
-              {selectedUser.status?.toLowerCase().replace('_', ' ')}
-            </span>
-          </div>
-          <div className="flex space-x-2">
-            {[Phone, Video, Pin, Bell, MoreVertical].map((Icon, i) => (
-              <Button key={i} variant="ghost" size="sm" className="text-gray-400 hover:text-white">
-                <Icon className="h-4 w-4" />
-              </Button>
-            ))}
-          </div>
-        </div>
+  <div className="flex items-center">
+    <div className="relative">
+      <Avatar className="h-8 w-8">
+        <AvatarImage src={selectedUser.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${selectedUser.username}`} />
+        <AvatarFallback>{selectedUser.username[0]?.toUpperCase()}</AvatarFallback>
+      </Avatar>
+      <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#36393f] ${getStatusColor(selectedUser.status)}`} />
+    </div>
+    <span className="ml-2 text-white font-medium">{selectedUser.displayName || selectedUser.username}</span>
+    <span className="ml-2 text-gray-400 text-sm capitalize">
+      {selectedUser.status?.toLowerCase().replace('_', ' ')}
+    </span>
+  </div>
+  <div className="flex space-x-2">
+    <Button 
+      variant="ghost" 
+      size="sm" 
+      className="text-gray-400 hover:text-white"
+      onClick={() => {
+        initiateCall(selectedUser.id, 'voice');
+        setIsCallInterfaceOpen(true);
+      }}
+    >
+      <Phone className="h-4 w-4" />
+    </Button>
+    <Button 
+      variant="ghost" 
+      size="sm" 
+      className="text-gray-400 hover:text-white"
+      onClick={() => {
+        initiateCall(selectedUser.id, 'video');
+        setIsCallInterfaceOpen(true);
+      }}
+    >
+      <Video className="h-4 w-4" />
+    </Button>
+    {[Pin, Bell, MoreVertical].map((Icon, i) => (
+      <Button key={i} variant="ghost" size="sm" className="text-gray-400 hover:text-white">
+        <Icon className="h-4 w-4" />
+      </Button>
+    ))}
+  </div>
+</div>
+<CallInterface
+  currentUser={currentUser}
+  isOpen={isCallInterfaceOpen}
+  onClose={() => setIsCallInterfaceOpen(false)}
+/>
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 bg-[#36393f]">
