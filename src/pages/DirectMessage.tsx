@@ -5,6 +5,7 @@ import { Input } from "../components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
 import { useCallSocket } from '../hooks/useCallSocket.js';
 import CallInterface from './callUI';
+
 import {
   MessageCircle,
   Send,
@@ -65,9 +66,10 @@ export default function DirectMessages({ currentUser, selectedUser }: DirectMess
   const [editContent, setEditContent] = useState<string>('');
   const editInputRef = useRef<HTMLInputElement>(null);
 
+const { initiateCall, incomingCall } = useCallSocket();
 
   const [isCallInterfaceOpen, setIsCallInterfaceOpen] = useState(false);
-const { initiateCall } = useCallSocket();
+const [callType, setCallType] = useState<'voice' | 'video'>('voice');
 
   // --- Group messages by date ---
   const groupMessagesByDate = (msgs: DirectMessage[]) => {
@@ -83,6 +85,14 @@ const { initiateCall } = useCallSocket();
       return groups;
     }, {});
   };
+
+
+useEffect(() => {
+  if (incomingCall) {
+    setIsCallInterfaceOpen(true);  // auto open the call UI
+    setCallType(incomingCall.type); // set correct type
+  }
+}, [incomingCall]);
 
   // Load conversation
   useEffect(() => {
@@ -347,28 +357,28 @@ console.log("selected user id:",selectedUser.id)
     </span>
   </div>
   <div className="flex space-x-2">
-    <Button 
-      variant="ghost" 
-      size="sm" 
-      className="text-gray-400 hover:text-white"
-      onClick={() => {
-        initiateCall(selectedUser.id, 'voice');
-        setIsCallInterfaceOpen(true);
-      }}
-    >
-      <Phone className="h-4 w-4" />
-    </Button>
-    <Button 
-      variant="ghost" 
-      size="sm" 
-      className="text-gray-400 hover:text-white"
-      onClick={() => {
-        initiateCall(selectedUser.id, 'video');
-        setIsCallInterfaceOpen(true);
-      }}
-    >
-      <Video className="h-4 w-4" />
-    </Button>
+ <Button 
+  variant="ghost" 
+  size="sm" 
+  className="text-gray-400 hover:text-white"
+  onClick={() => {
+    setCallType('voice');
+    setIsCallInterfaceOpen(true);
+  }}
+>
+<Phone className="h-4 w-4" />
+</Button>
+<Button 
+  variant="ghost" 
+  size="sm" 
+  className="text-gray-400 hover:text-white"
+  onClick={() => {
+    setCallType('video');
+    setIsCallInterfaceOpen(true);
+  }}
+>
+  <Video className="h-4 w-4" />
+</Button>
     {[Pin, Bell, MoreVertical].map((Icon, i) => (
       <Button key={i} variant="ghost" size="sm" className="text-gray-400 hover:text-white">
         <Icon className="h-4 w-4" />
@@ -376,11 +386,21 @@ console.log("selected user id:",selectedUser.id)
     ))}
   </div>
 </div>
-<CallInterface
-  currentUser={currentUser}
+{/* <CallInterface
+  currentUser={selectedUser} // or pass individual props
+  callType={callType}
   isOpen={isCallInterfaceOpen}
   onClose={() => setIsCallInterfaceOpen(false)}
+  onCallTypeChange={setCallType}initializeMedia
+/> */}
+<CallInterface
+  currentUser={selectedUser} // ✅ use logged-in user
+  callType={callType}
+  isOpen={isCallInterfaceOpen}
+  onClose={() => setIsCallInterfaceOpen(false)}
+  onCallTypeChange={setCallType}
 />
+
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 bg-[#36393f]">
