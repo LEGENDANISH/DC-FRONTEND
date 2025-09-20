@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
@@ -31,6 +31,7 @@ interface Friend extends User {
 interface FriendRequest {
   id: string;
   sender: User;
+  receiver: User; // Added receiver for sent requests
   createdAt: string;
 }
 
@@ -59,6 +60,7 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [addFriendInput, setAddFriendInput] = useState('');
+  const [notifications, setNotifications] = useState<Record<string, number>>({});
 
   // Fetch initial friends data
   useEffect(() => {
@@ -67,14 +69,56 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
     fetchSentRequests();
   }, []);
 
-  // Socket event listeners
+  // --- Notification Handling ---
+  // Load initial notifications from localStorage or a potential API call
+  useEffect(() => {
+    const savedNotifications = localStorage.getItem('dm_notifications');
+    if (savedNotifications) {
+      try {
+        setNotifications(JSON.parse(savedNotifications));
+      } catch (e) {
+        console.error("Failed to parse saved notifications", e);
+        setNotifications({}); // Fallback to empty
+      }
+    }
+  }, []);
+
+  // Save notifications to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem('dm_notifications', JSON.stringify(notifications));
+  }, [notifications]);
+
+  // Handle incoming direct messages from socket
+useEffect(() => {
+  if (!socket) return;
+
+  const handleDirectMessage = (message: { authorId: string; content: string }) => {
+    setNotifications(prev => {
+      const currentCount = prev[message.authorId] || 0;
+      const newCount = currentCount + 1;
+      return {
+        ...prev,
+        [message.authorId]: newCount
+      };
+    });
+  };
+
+  socket.on('direct_message_received', handleDirectMessage);
+
+  return () => {
+    socket.off('direct_message_received', handleDirectMessage);
+  };
+}, [socket]);
+
+
+  // --- Socket event listeners for friends data ---
   useEffect(() => {
     if (!socket) return;
 
     const handleFriendsData = (data: any) => {
-      setFriends(data.friends);
-      setPendingRequests(data.pendingRequests);
-      setSentRequests(data.sentRequests);
+      setFriends(data.friends || []);
+      setPendingRequests(data.pendingRequests || []);
+      setSentRequests(data.sentRequests || []);
     };
 
     const handleFriendRequest = (request: FriendRequest) => {
@@ -83,8 +127,10 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
 
     const handleFriendAdded = (data: { friend: Friend }) => {
       setFriends(prev => [...prev, data.friend]);
-      // Remove from pending if it exists
+      // Remove from pending if it exists (for the sender)
       setPendingRequests(prev => prev.filter(r => r.sender.id !== data.friend.id));
+      // Remove from sent requests if it exists (for the receiver)
+      setSentRequests(prev => prev.filter(r => r.receiver.id !== data.friend.id));
     };
 
     const handleFriendRemoved = (data: { userId: string }) => {
@@ -99,6 +145,7 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
 
     const handleRequestRemoved = (data: { requestId: string }) => {
       setPendingRequests(prev => prev.filter(r => r.id !== data.requestId));
+      setSentRequests(prev => prev.filter(r => r.id !== data.requestId));
     };
 
     socket.on('friends_initial_data', handleFriendsData);
@@ -118,6 +165,18 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
     };
   }, [socket]);
 
+  // Wrapper for onSelectDM to clear notifications
+  const handleSelectDMAndClearNotification = useCallback((user: User) => {
+    onSelectDM(user);
+    // Clear notification for this user
+    setNotifications(prev => {
+        const newNotifications = { ...prev };
+        delete newNotifications[user.id];
+        return newNotifications;
+    });
+  }, [onSelectDM]);
+
+  // --- API Calls ---
   const fetchFriends = async () => {
     try {
       const token = localStorage.getItem('token');
@@ -221,7 +280,7 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
         if (accept) {
           fetchFriends();
         }
-        fetchPendingRequests();
+        fetchPendingRequests(); // Refresh pending list
       } catch (error) {
         console.error('Failed to respond to friend request:', error);
       }
@@ -347,13 +406,22 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
                 {searchResults.map(user => (
                   <div key={user.id} className="flex items-center justify-between p-2 bg-[#36393f] rounded">
                     <div className="flex items-center space-x-3">
-                      <div className="relative">
-                        <Avatar className="h-10 w-10">
-                          <AvatarImage src={user.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${user.username}`} />
-                          <AvatarFallback>{user.username[0]?.toUpperCase()}</AvatarFallback>
-                        </Avatar>
-                        <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#36393f] ${getStatusColor(user.status)}`} />
-                      </div>
+                     <div className="relative">
+                      <Avatar className="h-10 w-10">
+                        <AvatarImage src={user.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${user.username}`} />
+                        <AvatarFallback>{user.username[0]?.toUpperCase()}</AvatarFallback>
+                      </Avatar>
+
+                      {/* Status dot */}
+                      <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#36393f] ${getStatusColor(user.status)}`} />
+
+                      {/* Notification badge for search results */}
+                      {notifications[user.id] > 0 && (
+                        <div className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                          {notifications[user.id] > 9 ? '9+' : notifications[user.id]}
+                        </div>
+                      )}
+                    </div>
                       <div>
                         <div className="font-semibold text-white">{user.displayName || user.username}</div>
                         <div className="text-sm text-gray-400">@{user.username}</div>
@@ -376,7 +444,7 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
                       {user.friendshipStatus === 'ACCEPTED' && (
                         <Button
                           size="sm"
-                          onClick={() => onSelectDM(user)}
+                          onClick={() => handleSelectDMAndClearNotification(user)} // Use wrapper
                           className="bg-blue-600 hover:bg-blue-700"
                         >
                           <MessageCircle className="h-4 w-4" />
@@ -407,16 +475,21 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
                   <div className="space-y-2">
                     {filteredFriends.map(friend => (
                       <div key={friend.id} className="flex items-center justify-between p-2 hover:bg-[#36393f] rounded group">
-                        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => onSelectDM(friend)}>
+                        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => handleSelectDMAndClearNotification(friend)}> {/* Use wrapper */}
                           <div className="relative">
                             <Avatar className="h-10 w-10">
                               <AvatarImage src={friend.avatar || `https://api.dicebear.com/6.x/bottts/svg?seed=${friend.username}`} />
                               <AvatarFallback>{friend.username[0]?.toUpperCase()}</AvatarFallback>
                             </Avatar>
                             <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#2f3136] ${getStatusColor(friend.status)}`} />
+                            {/* Notification badge for friends list */}
+                            {notifications[friend.id] > 0 && (
+                              <div className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                                {notifications[friend.id] > 9 ? '9+' : notifications[friend.id]}
+                              </div>
+                            )}
                           </div>
                           <div>
-                            
                             <div className="font-semibold text-white">{friend.displayName || friend.username}</div>
                             <div className="text-sm text-gray-400 capitalize">
                               {friend.status?.toLowerCase().replace('_', ' ') || 'offline'}
@@ -425,7 +498,6 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
                         </div>
                         
                         <div className="flex items-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                          
                           <Button
                             size="sm"
                             variant="ghost"
@@ -446,7 +518,7 @@ export default function FriendsPanel({ socket, onSelectDM }: FriendsPanelProps) 
             {activeTab === 'pending' && (
               <div className="p-4">
                 <h3 className="text-sm font-semibold text-gray-400 mb-2 uppercase">
-                  Pending — {pendingRequests.length}
+                  Incoming — {pendingRequests.length}
                 </h3>
                 {pendingRequests.length === 0 ? (
                   <div className="text-gray-400 text-sm text-center py-8">

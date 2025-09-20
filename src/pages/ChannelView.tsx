@@ -1,10 +1,19 @@
 // src/components/ChannelViewer.tsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Avatar, AvatarFallback, AvatarImage } from "../components/ui/avatar";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
-import { Hash, Volume2 } from "lucide-react";
-import useSocket from "../hooks/useSocket";
+import { Hash, Volume2, MoreVertical, Copy, Trash2, Check, X } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import useChannelChat from "../hooks/useChannelChat";
+import axios from 'axios';
 
 interface Channel {
   id: string;
@@ -23,6 +32,7 @@ interface User {
 interface Message {
   id: string;
   content: string;
+  channelId: string;
   author: {
     id: string;
     username: string;
@@ -30,155 +40,163 @@ interface Message {
     avatar?: string;
   };
   createdAt: string;
+  updatedAt?: string;
+  edited?: boolean;
   isSending?: boolean;
 }
 
-const ChannelViewer: React.FC<{ selectedChannel: Channel }> = ({ selectedChannel }) => {
-  const [messages, setMessages] = useState<Message[]>([]);
+interface ChannelViewerProps {
+  selectedChannel: Channel;
+  currentUser: User | null;
+}
+
+const ChannelViewer: React.FC<ChannelViewerProps> = ({ selectedChannel, currentUser }) => {
   const [newMessage, setNewMessage] = useState("");
-  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
-  const { socket, isConnected, joinChannel, leaveChannel } = useSocket();
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState<string>('');
+  const editInputRef = useRef<HTMLInputElement>(null);
+  
+  const {
+    messages,
+    isLoading,
+    isConnected,
+    error,
+    sendMessage,
+    updateMessage,
+    deleteMessage,
+    setMessages
+  } = useChannelChat({ channelId: selectedChannel?.id || null });
 
-  // Fetch messages when a channel is selected
+  // Group messages by date
+  const groupMessagesByDate = (msgs: Message[]) => {
+    return msgs.reduce((groups: Record<string, Message[]>, msg) => {
+      const dateKey = new Date(msg.createdAt).toLocaleDateString("en-US", {
+        day: "numeric",
+        month: "long",
+        year: "numeric"
+      });
+      if (!groups[dateKey]) groups[dateKey] = [];
+      groups[dateKey].push(msg);
+      return groups;
+    }, {});
+  };
+
+  // Focus edit input when editing starts
   useEffect(() => {
-    const fetchMessages = async () => {
-      if (!selectedChannel) {
-        setMessages([]);
-        return;
-      }
+    if (editingMessageId && editInputRef.current) {
+      editInputRef.current.focus();
+    }
+  }, [editingMessageId]);
 
-      setIsLoadingMessages(true);
-      try {
-        const token = localStorage.getItem("token");
-        if (!token) return;
+  // Send message
+  const handleMessageSend = () => {
+    if (!newMessage.trim() || !selectedChannel || !isConnected || !currentUser) return;
+    
+    sendMessage(newMessage);
+    setNewMessage("");
+  };
 
-        const res = await fetch(
-          `http://localhost:3000/api/channels/${selectedChannel.id}/messages?limit=50`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
+  // Edit message handlers
+  const handleStartEdit = (message: Message) => {
+    if (message.author.id !== currentUser?.id) return;
+    setEditingMessageId(message.id);
+    setEditContent(message.content);
+  };
 
-        if (res.ok) {
-          const messageData = await res.json();
-          setMessages(messageData);
-        }
-      } catch (err) {
-        console.error("Failed to fetch messages", err);
-        setMessages([]);
-      } finally {
-        setIsLoadingMessages(false);
-      }
-    };
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditContent('');
+  };
 
-    fetchMessages();
-  }, [selectedChannel]);
-
-  // Join/leave channels when selection changes
-  useEffect(() => {
-    if (!socket || !isConnected) return;
-
-    const prevChannelId = selectedChannel?.id;
-
-    // Join the new channel
-    if (selectedChannel) {
-      joinChannel(selectedChannel.id);
+  const handleSaveEdit = async () => {
+    if (!editingMessageId || !editContent.trim() || !selectedChannel || !currentUser) {
+      return;
     }
 
-    // Cleanup: leave the previous channel
-    return () => {
-      if (prevChannelId) {
-        leaveChannel(prevChannelId);
-      }
-    };
-  }, [selectedChannel, socket, isConnected, joinChannel, leaveChannel]);
+    const originalMessage = messages.find(msg => msg.id === editingMessageId);
+    if (!originalMessage || originalMessage.author.id !== currentUser.id) {
+      handleCancelEdit();
+      return;
+    }
 
-  // Handle real-time socket events for channel messages
-  useEffect(() => {
-    if (!socket || !isConnected) return;
-
-    const handleNewMessage = (message: Message) => {
-      // Only add messages for the currently selected channel
-      // (Backend should ideally handle this filtering)
-      if (message.channelId === selectedChannel?.id) {
-        setMessages(prev => {
-          const filtered = prev.filter(m => !m.isSending || m.id !== message.id);
-          return [...filtered, message];
-        });
-      }
-    };
-
-    const handleMessageUpdate = (message: Message) => {
-      setMessages(prev =>
-        prev.map(m => m.id === message.id ? message : m)
-      );
-    };
-
-    const handleMessageDelete = (data: { messageId: string }) => {
-      setMessages(prev =>
-        prev.filter(m => m.id !== data.messageId)
-      );
-    };
-
-    const handleError = (error: { message: string }) => {
-      console.error("Socket error:", error);
-      alert(`Error: ${error.message}`);
-    };
-
-    // Listen to socket events
-    socket.on('message', handleNewMessage);
-    socket.on('message_update', handleMessageUpdate);
-    socket.on('message_delete', handleMessageDelete);
-    socket.on('error', handleError);
-
-    return () => {
-      socket.off('message', handleNewMessage);
-      socket.off('message_update', handleMessageUpdate);
-      socket.off('message_delete', handleMessageDelete);
-      socket.off('error', handleError);
-    };
-  }, [socket, isConnected, selectedChannel?.id]);
-
-  const handleMessageSend = async () => {
-    if (!newMessage.trim() || !selectedChannel || !socket || !isConnected) return;
-
-    const tempId = `temp-${Date.now()}`;
-    // Assuming you have access to the current user data somehow, e.g., via context or prop
-    // For now, placeholder user data. You might need to pass currentUser as a prop.
-    const currentUser = { id: 'current-user-id-placeholder', username: 'You', displayName: 'You', avatar: null };
-
-    const tempMessage: Message = {
-      id: tempId,
-      content: newMessage,
-      author: {
-        id: currentUser.id,
-        username: currentUser.username,
-        displayName: currentUser.displayName,
-        avatar: currentUser.avatar
-      },
-      createdAt: new Date().toISOString(),
-      isSending: true,
-    };
-
-    setMessages(prev => [...prev, tempMessage]);
-    const messageContent = newMessage;
-    setNewMessage("");
+    if (editContent.trim() === originalMessage.content) {
+      handleCancelEdit();
+      return;
+    }
 
     try {
-      // Emit the message via socket
-      socket.emit('send_message', {
-        content: messageContent,
-        channelId: selectedChannel.id
-      });
+      // Optimistically update UI
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === editingMessageId ? { ...msg, content: editContent.trim(), edited: true } : msg
+        )
+      );
 
-      // Optimistically remove temp message (real one will come back via socket)
-      // setMessages(prev => prev.filter(m => m.id !== tempId)); // Optional: remove temp
+      await updateMessage(editingMessageId, editContent.trim());
+    } catch (error) {
+      console.error('Failed to edit message:', error);
+      // Revert optimistic update on error
+      setMessages(prev =>
+        prev.map(msg => (msg.id === editingMessageId ? originalMessage : msg))
+      );
+      alert('Failed to edit message.');
+    } finally {
+      handleCancelEdit();
+    }
+  };
 
+  const handleEditKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') handleSaveEdit();
+    else if (e.key === 'Escape') handleCancelEdit();
+  };
+
+  // Copy message content to clipboard
+  const handleCopyMessage = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
     } catch (err) {
-      console.error("Failed to send message", err);
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      setNewMessage(messageContent);
-      alert("Failed to send message.");
+      console.error('Failed to copy message: ', err);
+      alert('Failed to copy message.');
+    }
+  };
+
+  // Delete message
+  const handleDeleteMessage = async (messageId: string) => {
+    const confirmDelete = window.confirm('Are you sure you want to delete this message?');
+    if (!confirmDelete) return;
+
+    try {
+      // Optimistic UI update
+      setMessages(prev => prev.filter(msg => msg.id !== messageId));
+      await deleteMessage(messageId);
+    } catch (err) {
+      console.error("Delete message failed:", err);
+      alert("Failed to delete message. Please try again.");
+      
+      // Reload messages on error
+      if (selectedChannel) {
+        const reloadMessages = async () => {
+          try {
+            const token = localStorage.getItem('token');
+            if (!token) return;
+
+            const res = await fetch(
+              `http://localhost:3000/api/channels/${selectedChannel.id}/messages?limit=50`,
+              {
+                headers: { Authorization: `Bearer ${token}` },
+              }
+            );
+
+            if (res.ok) {
+              const messageData = await res.json();
+              setMessages(messageData);
+            }
+          } catch (error) {
+            console.error('Failed to reload messages:', error);
+          }
+        };
+        reloadMessages();
+      }
     }
   };
 
@@ -189,21 +207,28 @@ const ChannelViewer: React.FC<{ selectedChannel: Channel }> = ({ selectedChannel
     }
   };
 
+  // Display error if any
+  useEffect(() => {
+    if (error) {
+      alert(`Error: ${error}`);
+    }
+  }, [error]);
+
   return (
     <>
       {/* Channel header */}
-      <div className="p-3 border-b border-gray-700 flex items-center bg-[#313338]">
+<div className="h-[49.5px] border-t border-r border-l-0 border flex items-center bg-[#2b2d31]">
         {selectedChannel.type === 'TEXT' ? (
-          <Hash className="h-5 w-5 text-gray-400 mr-2" />
+          <Hash className="h-5 w-5 ml-4 text-gray-400 mr-2" />
         ) : (
           <Volume2 className="h-5 w-5 text-gray-400 mr-2" />
         )}
-        <span className="font-semibold">{selectedChannel.name}</span>
+        <span className="font-semibold  text-white">{selectedChannel.name}</span>
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#36393f]">
-        {isLoadingMessages ? (
+        {isLoading ? (
           <div className="flex justify-center items-center h-32">
             <div className="text-gray-400">Loading messages...</div>
           </div>
@@ -212,43 +237,132 @@ const ChannelViewer: React.FC<{ selectedChannel: Channel }> = ({ selectedChannel
             <div className="text-gray-400">No messages yet. Be the first to say something!</div>
           </div>
         ) : (
-          messages.map((msg) => (
-            <div key={msg.id} className={`flex hover:bg-[#32353b] p-2 rounded ${msg.isSending ? 'opacity-60' : ''}`}>
-              <Avatar className="h-10 w-10 mr-3 flex-shrink-0">
-                <AvatarImage
-                  src={
-                    msg.author?.avatar ||
-                    `https://api.dicebear.com/6.x/bottts/svg?seed=${msg.author?.username || 'default'}`
-                  }
-                  alt={msg.author?.username || "User"}
-                />
-                <AvatarFallback>
-                  {msg.author?.username?.[0]?.toUpperCase() || "?"}
-                </AvatarFallback>
-              </Avatar>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-baseline">
-                  <span className="font-semibold text-white mr-2">
-                    {msg.author?.displayName || msg.author?.username || "Unknown User"}
-                  </span>
-                  <span className="text-xs text-gray-400">
-                    {new Date(msg.createdAt).toLocaleString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      month: 'short',
-                      day: 'numeric'
-                    })}
-                  </span>
-                  {msg.isSending && (
-                    <span className="text-xs text-gray-500 ml-2">Sending...</span>
-                  )}
+          <div className="space-y-4">
+            {Object.entries(groupMessagesByDate(messages)).map(([date, msgs]) => (
+              <div key={date}>
+                {/* Date Divider */}
+                <div className="flex items-center my-4">
+                  <div className="flex-grow border-t border-gray-600"></div>
+                  <span className="mx-2 text-gray-400 text-xs">{date}</span>
+                  <div className="flex-grow border-t border-gray-600"></div>
                 </div>
-                <div className="text-gray-300 break-words">
-                  {msg.content}
-                </div>
+
+                {msgs.map((msg) => (
+                  <div key={msg.id} className={`flex hover:bg-[#32353b] p-2 rounded group ${msg.isSending ? 'opacity-60' : ''}`}>
+                    <Avatar className="h-10 w-10 mr-3 flex-shrink-0">
+                      <AvatarImage
+                        src={
+                          msg.author?.avatar ||
+                          `https://api.dicebear.com/6.x/bottts/svg?seed=${msg.author?.username || 'default'}`
+                        }
+                        alt={msg.author?.username || "User"}
+                      />
+                      <AvatarFallback>
+                        {msg.author?.username?.[0]?.toUpperCase() || "?"}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      {/* Header with name, timestamp, and menu */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-baseline">
+                          <span className="font-semibold text-white mr-2">
+                            {msg.author?.displayName || msg.author?.username || "Unknown User"}
+                          </span>
+                          <span className="text-xs text-gray-400">
+                            {new Date(msg.createdAt).toLocaleString("en-GB", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              year: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                          {msg.isSending && (
+                            <span className="text-xs text-gray-500 ml-2">Sending...</span>
+                          )}
+                        </div>
+                        
+                        {/* Three-dot menu - Only for own messages */}
+                        {msg.author.id === currentUser?.id && (
+                          <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="p-1 h-6 w-6 text-gray-400 hover:text-gray-200 hover:bg-[#40444b]"
+                                >
+                                  <MoreVertical className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="bg-[#18191c] border-[#202225] text-white">
+                                <DropdownMenuLabel>Message</DropdownMenuLabel>
+                                <DropdownMenuSeparator className="bg-[#202225]" />
+                                <DropdownMenuItem
+                                  className="hover:bg-[#36393f] focus:bg-[#36393f] cursor-pointer"
+                                  onClick={() => handleStartEdit(msg)}
+                                >
+                                  <span>Edit</span>
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  className="hover:bg-[#36393f] focus:bg-[#36393f] cursor-pointer"
+                                  onClick={() => handleCopyMessage(msg.content)}
+                                >
+                                  <Copy className="mr-2 h-4 w-4" />
+                                  <span>Copy</span>
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  className="hover:bg-red-600 focus:bg-red-600 text-red-400 hover:text-white focus:text-white cursor-pointer"
+                                  onClick={() => handleDeleteMessage(msg.id)}
+                                >
+                                  <Trash2 className="mr-2 h-4 w-4" />
+                                  <span>Delete</span>
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Message Content / Edit Input */}
+                      <div className="mt-1">
+                        {editingMessageId === msg.id ? (
+                          // Edit mode
+                          <div className="flex items-center">
+                            <Input
+                              ref={editInputRef}
+                              type="text"
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              onKeyDown={handleEditKeyDown}
+                              className="flex-1 bg-[#40444b] text-white border-0 focus:ring-1 focus:ring-blue-500"
+                            />
+                            <Button onClick={handleSaveEdit} size="sm" variant="ghost" className="ml-2 text-green-400 hover:text-green-300 hover:bg-[#40444b]">
+                              <Check className="h-4 w-4" />
+                            </Button>
+                            <Button onClick={handleCancelEdit} size="sm" variant="ghost" className="ml-1 text-gray-400 hover:text-gray-300 hover:bg-[#40444b]">
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ) : (
+                          // Display mode
+                          <div 
+                            className="text-gray-300 break-words cursor-text flex items-start"
+                            onDoubleClick={() => handleStartEdit(msg)}
+                          >
+                            <span className="flex-1">{msg.content}</span>
+                            {msg.edited && (
+                              <span className="text-xs text-gray-500 ml-2 mt-0.5 flex-shrink-0">(edited)</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
 
